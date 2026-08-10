@@ -10,7 +10,8 @@ def home():
     return "Bot is alive!"
 
 def run():
-    port = int(os.environ.get("PORT", 8080))
+    # Set to 10000 for Render / UptimeRobot 24/7 uptime
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
@@ -21,18 +22,17 @@ def keep_alive():
 keep_alive()
 # ------------------------------
 
-import os
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
 import yt_dlp
 
 # ================= CONFIGURATION =================
-# Recommended: Set this as an environment variable in Render/PythonAnywhere
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8984748799:AAGO7ebLuvqVreF6871Zo2sCFSU8XstOtUw")
 CHANNEL_ID = -1003955525068
 CHANNEL_URL = "https://t.me/vidsnaphd"
 CHANNEL_USERNAME = "@vidsnaphd"
+BOT_USERNAME = "@VidSnapHD_bot"
 # =================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -71,7 +71,7 @@ def start_command(message):
         "• 📱 *TikTok* _(No Watermark)_\n"
         "• 📸 *Instagram* _(Reels, Posts, Stories)_\n"
         "• ▶️ *YouTube* _(Shorts & Videos)_\n\n"
-        "Just drop the video link here and I will download it instantly!"
+        "Just drop the video link here and I will download the video & audio for you!"
     )
     bot.send_message(message.chat.id, welcome_msg, parse_mode="Markdown")
 
@@ -100,34 +100,60 @@ def process_video_link(message):
         bot.reply_to(message, "❌ Please send a valid video URL link.")
         return
 
-    status_msg = bot.reply_to(message, "⚡ *Downloading video... Please wait...*", parse_mode="Markdown")
-    file_name = f"video_{message.chat.id}_{message.message_id}.mp4"
+    status_msg = bot.reply_to(message, "⚡ *Downloading video & extracting audio...*", parse_mode="Markdown")
     
-    ydl_opts = {
+    video_file = f"video_{message.chat.id}_{message.message_id}.mp4"
+    audio_file = f"audio_{message.chat.id}_{message.message_id}.mp3"
+    
+    ydl_opts_video = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': file_name,
+        'outtmpl': video_file,
         'quiet': True,
         'no_warnings': True,
-        'max_filesize': 50 * 1024 * 1024,  # Restrict to 50MB limit for Telegram
+        'max_filesize': 50 * 1024 * 1024,
+    }
+
+    ydl_opts_audio = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': audio_file,
+        'quiet': True,
+        'no_warnings': True,
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # 1. Download & Send Video (with Bot Tag)
+        with yt_dlp.YoutubeDL(ydl_opts_video) as ydl:
             ydl.download([url])
 
-        if os.path.exists(file_name):
-            with open(file_name, 'rb') as video_file:
-                bot.send_video(message.chat.id, video_file, caption="⚡ Downloaded via @vidsnaphd")
-            bot.delete_message(message.chat.id, status_msg.message_id)
-        else:
-            bot.edit_message_text("❌ Failed to output media file.", message.chat.id, status_msg.message_id)
+        if os.path.exists(video_file):
+            with open(video_file, 'rb') as vf:
+                bot.send_video(message.chat.id, vf, caption=f"⚡ Downloaded via {BOT_USERNAME}")
+        
+        # 2. Download & Send Audio (with Bot Tag)
+        with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
+            ydl.download([url])
+
+        if os.path.exists(audio_file):
+            with open(audio_file, 'rb') as af:
+                bot.send_audio(message.chat.id, af, caption=f"🎵 Audio Track via {BOT_USERNAME}")
+
+        # Delete status message when finished
+        bot.delete_message(message.chat.id, status_msg.message_id)
 
     except Exception as e:
-        bot.edit_message_text("❌ Error downloading video. Check if the link is public or under 50MB.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Error processing media. Check if the link is public or under 50MB.", message.chat.id, status_msg.message_id)
+        
     finally:
-        # Guarantee cleanup of local file
-        if os.path.exists(file_name):
-            os.remove(file_name)
+        # Clean up temporary files
+        if os.path.exists(video_file):
+            os.remove(video_file)
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
 
 if __name__ == "__main__":
     print("🚀 VidSnapHD Bot is running successfully!")
