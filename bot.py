@@ -26,6 +26,13 @@ from telebot import types
 from telebot.apihelper import ApiTelegramException
 import yt_dlp
 
+# Automatically download & add FFmpeg to system PATH for Render
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception as e:
+    print(f"FFmpeg setup warning: {e}")
+
 # ================= CONFIGURATION =================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8984748799:AAGO7ebLuvqVreF6871Zo2sCFSU8XstOtUw")
 CHANNEL_ID = -1003955525068
@@ -102,7 +109,7 @@ def process_video_link(message):
     status_msg = bot.reply_to(message, "⚡ *Downloading video & audio...*", parse_mode="Markdown")
     
     video_file = f"video_{message.chat.id}_{message.message_id}.mp4"
-    audio_file_template = f"audio_{message.chat.id}_{message.message_id}.%(ext)s"
+    audio_file = f"audio_{message.chat.id}_{message.message_id}.mp3"
     
     ydl_opts_video = {
         'format': 'best',
@@ -112,10 +119,14 @@ def process_video_link(message):
         'max_filesize': 50 * 1024 * 1024,
     }
 
-    # Extract best native audio without needing FFmpeg conversion
     ydl_opts_audio = {
         'format': 'bestaudio/best',
-        'outtmpl': audio_file_template,
+        'outtmpl': f"audio_{message.chat.id}_{message.message_id}",
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
         'quiet': True,
         'no_warnings': True,
     }
@@ -128,32 +139,30 @@ def process_video_link(message):
         if os.path.exists(video_file):
             with open(video_file, 'rb') as vf:
                 bot.send_video(message.chat.id, vf, caption=f"⚡ Downloaded via {BOT_USERNAME}")
-        
-        # 2. Download & Send Audio Track
+
+        # 2. Extract & Send Audio
         with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
             ydl.download([url])
 
-        # Locate downloaded audio file with its native extension (.m4a, .mp3, etc.)
-        for file in os.listdir('.'):
-            if file.startswith(f"audio_{message.chat.id}_{message.message_id}"):
-                with open(file, 'rb') as af:
-                    bot.send_audio(message.chat.id, af, caption=f"🎵 Audio Track via {BOT_USERNAME}")
-                os.remove(file)
-                break
+        if os.path.exists(audio_file):
+            with open(audio_file, 'rb') as af:
+                bot.send_audio(message.chat.id, af, caption=f"🎵 Audio Track via {BOT_USERNAME}")
 
-        # Remove processing message
+        # Delete status message
         try:
             bot.delete_message(message.chat.id, status_msg.message_id)
         except Exception:
             pass
 
     except Exception as e:
-        bot.edit_message_text("❌ Error processing media. Check if the link is public or under 50MB.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text(f"❌ Failed: {str(e)}", message.chat.id, status_msg.message_id)
         
     finally:
-        # Cleanup video file
+        # Cleanup files
         if os.path.exists(video_file):
             os.remove(video_file)
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
 
 if __name__ == "__main__":
     print("🚀 VidSnapHD Bot is running successfully!")
