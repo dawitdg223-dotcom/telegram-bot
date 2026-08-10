@@ -10,7 +10,6 @@ def home():
     return "Bot is alive!"
 
 def run():
-    # Set to 10000 for Render / UptimeRobot 24/7 uptime
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
@@ -100,33 +99,29 @@ def process_video_link(message):
         bot.reply_to(message, "❌ Please send a valid video URL link.")
         return
 
-    status_msg = bot.reply_to(message, "⚡ *Downloading video & extracting audio...*", parse_mode="Markdown")
+    status_msg = bot.reply_to(message, "⚡ *Downloading video & audio...*", parse_mode="Markdown")
     
     video_file = f"video_{message.chat.id}_{message.message_id}.mp4"
-    audio_file = f"audio_{message.chat.id}_{message.message_id}.mp3"
+    audio_file_template = f"audio_{message.chat.id}_{message.message_id}.%(ext)s"
     
     ydl_opts_video = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best',
         'outtmpl': video_file,
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 50 * 1024 * 1024,
     }
 
+    # Extract best native audio without needing FFmpeg conversion
     ydl_opts_audio = {
         'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': audio_file,
+        'outtmpl': audio_file_template,
         'quiet': True,
         'no_warnings': True,
     }
 
     try:
-        # 1. Download & Send Video (with Bot Tag)
+        # 1. Download & Send Video
         with yt_dlp.YoutubeDL(ydl_opts_video) as ydl:
             ydl.download([url])
 
@@ -134,26 +129,31 @@ def process_video_link(message):
             with open(video_file, 'rb') as vf:
                 bot.send_video(message.chat.id, vf, caption=f"⚡ Downloaded via {BOT_USERNAME}")
         
-        # 2. Download & Send Audio (with Bot Tag)
+        # 2. Download & Send Audio Track
         with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
             ydl.download([url])
 
-        if os.path.exists(audio_file):
-            with open(audio_file, 'rb') as af:
-                bot.send_audio(message.chat.id, af, caption=f"🎵 Audio Track via {BOT_USERNAME}")
+        # Locate downloaded audio file with its native extension (.m4a, .mp3, etc.)
+        for file in os.listdir('.'):
+            if file.startswith(f"audio_{message.chat.id}_{message.message_id}"):
+                with open(file, 'rb') as af:
+                    bot.send_audio(message.chat.id, af, caption=f"🎵 Audio Track via {BOT_USERNAME}")
+                os.remove(file)
+                break
 
-        # Delete status message when finished
-        bot.delete_message(message.chat.id, status_msg.message_id)
+        # Remove processing message
+        try:
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        except Exception:
+            pass
 
     except Exception as e:
         bot.edit_message_text("❌ Error processing media. Check if the link is public or under 50MB.", message.chat.id, status_msg.message_id)
         
     finally:
-        # Clean up temporary files
+        # Cleanup video file
         if os.path.exists(video_file):
             os.remove(video_file)
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
 
 if __name__ == "__main__":
     print("🚀 VidSnapHD Bot is running successfully!")
