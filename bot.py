@@ -4,7 +4,10 @@ import requests
 import asyncio
 import os
 import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ReplyKeyboardMarkup, KeyboardButton
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, 
+    LabeledPrice, ReplyKeyboardMarkup, KeyboardButton
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
     PreCheckoutQueryHandler, ContextTypes, MessageHandler, filters
@@ -17,6 +20,9 @@ FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "e76280d3408441a6891d
 CHANNEL_ID = -1003955525068
 CHANNEL_LINK = "https://t.me/vidsnaphd"
 ADMIN_USER_ID = 5287278470  # Admin Telegram ID
+
+# Telegram Gift ID used for automated payouts (Replace with active Gift ID from Telegram)
+TELEGRAM_GIFT_ID = "521111022838031523"
 
 HOUSE_CUT_PERCENT = 0.20  # 20% Admin Profit
 TIERS = [10, 50, 100, 500, 1000]
@@ -83,24 +89,31 @@ def db_save_prediction(user_id, match_id, tier, score):
     conn.commit()
     conn.close()
 
-# --- HELPER FUNCTIONS ---
+# --- CHANNEL FORCE-SUB CHECK ---
 async def is_user_subscribed(bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ["creator", "administrator", "member"]
-    except Exception:
-        return True  # Fallback to prevent blocking if channel check fails
+    except Exception as e:
+        print(f"Sub Check Error (Ensure bot is ADMIN in channel!): {e}")
+        return False
 
-async def send_join_request_message(update, context: ContextTypes.DEFAULT_TYPE):
+async def send_join_request_message(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📢 Join Channel First", url=CHANNEL_LINK)],
         [InlineKeyboardButton("✅ Verify Subscription", callback_data="check_sub")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "⚠️ **Access Denied!**\n\nYou must join our channel to use Football Betting Bot!"
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    text = (
+        "⚠️ **ACCESS DENIED!** ⚠️\n\n"
+        "You must join our official Telegram Channel to use Football Betting Bot!\n\n"
+        "1️⃣ Tap **'📢 Join Channel First'** below.\n"
+        "2️⃣ Tap **'✅ Verify Subscription'** after joining!"
+    )
+    if hasattr(update_or_query, 'message') and update_or_query.message:
+        await update_or_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
+# --- MATCH API FETCHING ---
 def get_today_matches():
     current_time = time.time()
     if current_time - MATCHES_CACHE["timestamp"] < CACHE_DURATION and MATCHES_CACHE["data"]:
@@ -139,7 +152,7 @@ def calculate_points(pred_score, actual_h, actual_a):
         
     return 0
 
-# --- AUTOMATED SETTLEMENT JOB ---
+# --- AUTOMATED SETTLEMENT & INSTANT GIFT PAYOUT JOB ---
 async def auto_settle_and_payout_job(context: ContextTypes.DEFAULT_TYPE):
     matches = get_today_matches()
     finished_matches = {m["id"]: m["score"]["fullTime"] for m in matches if m["status"] == "FINISHED"}
@@ -181,21 +194,31 @@ async def auto_settle_and_payout_job(context: ContextTypes.DEFAULT_TYPE):
 
                 for w in winners:
                     user_id = w["user_id"]
-                    
                     cursor.execute("UPDATE predictions SET status = 'SETTLED_WIN' WHERE id = ?", (w["pred_id"],))
-                    cursor.execute("UPDATE users SET star_balance = star_balance + ? WHERE user_id = ?", (share_per_winner, user_id))
 
+                    # AUTOMATED STAR GIFT TRANSFER
                     try:
-                        msg = (
-                            f"🥳 **CONGRATULATIONS! YOU WON!** 🎉\n\n"
-                            f"🏆 **Rank:** 1st Place (⭐ `{tier} Stars Room`)\n"
-                            f"⚽ **Match ID:** `{match_id}`\n"
-                            f"💰 **Prize:** `{share_per_winner} Stars` added to your balance!\n\n"
-                            f"Click **💰 My Balance** to check your total or **📤 Withdraw Stars** to claim!"
+                        await context.bot.send_gift(
+                            user_id=user_id,
+                            gift_id=TELEGRAM_GIFT_ID,
+                            text=f"🏆 Congratulations! You won {share_per_winner} Stars in the match pool!"
                         )
-                        await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+                        print(f"✅ Automated Gift sent to user {user_id}")
                     except Exception as e:
-                        print(f"Error sending winner alert: {e}")
+                        print(f"❌ Gift API Error, adding to balance fallback: {e}")
+                        cursor.execute("UPDATE users SET star_balance = star_balance + ? WHERE user_id = ?", (share_per_winner, user_id))
+
+                        try:
+                            msg = (
+                                f"🥳 **CONGRATULATIONS! YOU WON!** 🎉\n\n"
+                                f"🏆 **Rank:** 1st Place (⭐ `{tier} Stars Room`)\n"
+                                f"⚽ **Match ID:** `{match_id}`\n"
+                                f"💰 **Prize Credit:** `{share_per_winner} Stars` added to your balance!\n\n"
+                                f"Tap **💰 My Balance** to view total or **📤 Withdraw Stars** to claim!"
+                            )
+                            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+                        except Exception as msg_err:
+                            print(f"Error sending alert: {msg_err}")
 
             for s in scores:
                 if s["points"] < max_pts or max_pts == 0:
@@ -204,25 +227,55 @@ async def auto_settle_and_payout_job(context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-# --- COMMANDS & HANDLERS ---
+# --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not await is_user_subscribed(context.bot, user.id):
+        await send_join_request_message(update, context)
+        return
+
     db_add_user(user.id, user.username or user.first_name)
 
     welcome_text = (
         f"⚽ **Welcome {user.first_name} to Football Betting Bot!** ⭐\n\n"
-        "Predict scores for upcoming football matches, join Star pools, and win the prize pot!\n\n"
+        "Predict scorelines, join Star pools, and win automated Telegram Star Gifts!\n\n"
         "👇 **Tap '⚽ View Matches' below to start betting:**"
     )
     await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
+async def verify_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if await is_user_subscribed(context.bot, user_id):
+        await query.answer("✅ Verification Successful! Welcome!", show_alert=True)
+        db_add_user(user_id, query.from_user.username or query.from_user.first_name)
+        
+        welcome_text = (
+            f"⚽ **Welcome {query.from_user.first_name}!** ⭐\n\n"
+            "Predict match scores, climb leaderboards, and win Star prize pools!\n\n"
+            "👇 Tap **'⚽ View Matches'** below to begin!"
+        )
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    else:
+        await query.answer("❌ You haven't joined @vidsnaphd yet! Join the channel then try again.", show_alert=True)
+
 async def matches_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await is_user_subscribed(context.bot, user_id):
+        await send_join_request_message(update, context)
+        return
+
     matches = get_today_matches()
     if not matches:
         await update.message.reply_text("⚽ No scheduled matches found right now! Check back later.", reply_markup=get_main_keyboard())
         return
 
-    await update.message.reply_text("⚽ **Upcoming Featured Matches:**\nTap a button below to place your prediction!", parse_mode="Markdown")
+    await update.message.reply_text("⚽ **Upcoming Featured Matches:**\nTap a score button below to place your prediction!", parse_mode="Markdown")
 
     for m in matches[:5]:
         home = m.get("homeTeam", {}).get("name", "Home")
@@ -233,10 +286,10 @@ async def matches_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"🏆 **{home}** vs **{away}**\n📅 Date: `{utc_date} UTC`\n🆔 Match ID: `{match_id}`"
         
         keyboard = [
-            [InlineKeyboardButton("🎯 Bet 2-1", callback_data=f"pred_{match_id}_2-1"),
-             InlineKeyboardButton("🎯 Bet 1-1", callback_data=f"pred_{match_id}_1-1")],
-            [InlineKeyboardButton("🎯 Bet 1-0", callback_data=f"pred_{match_id}_1-0"),
-             InlineKeyboardButton("🎯 Bet 0-2", callback_data=f"pred_{match_id}_0-2")]
+            [InlineKeyboardButton("🎯 Pick 2-1", callback_data=f"pred_{match_id}_2-1"),
+             InlineKeyboardButton("🎯 Pick 1-1", callback_data=f"pred_{match_id}_1-1")],
+            [InlineKeyboardButton("🎯 Pick 1-0", callback_data=f"pred_{match_id}_1-0"),
+             InlineKeyboardButton("🎯 Pick 0-2", callback_data=f"pred_{match_id}_0-2")]
         ]
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -248,11 +301,11 @@ async def handle_prediction_button(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = []
     for t in TIERS:
-        keyboard.append([InlineKeyboardButton(f"⭐ Pay {t} Stars Entry Pool", callback_data=f"pay_{t}_{match_id}_{score}")])
+        keyboard.append([InlineKeyboardButton(f"⭐ Enter {t} Stars Tier Pool", callback_data=f"pay_{t}_{match_id}_{score}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_text(
-        f"🎯 **Select Betting Tier for Pick ({score}):**",
+        f"🎯 **Select Entry Pool Tier for Pick `{score}`:**",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -264,18 +317,19 @@ async def handle_payment_button(update: Update, context: ContextTypes.DEFAULT_TY
     _, tier_str, match_id, score = query.data.split("_")
     tier = int(tier_str)
 
-    title = f"⭐ {tier} Stars Prediction Ticket"
-    description = f"Match ID: {match_id} | Prediction Pick: {score}"
+    title = f"Football Prediction Pool"
+    description = f"Match ID: {match_id} | Your Pick: {score}"
     payload = f"{match_id}:{tier}:{score}"
 
+    # Native Telegram Stars Invoice Modal
     await context.bot.send_invoice(
         chat_id=query.message.chat_id,
         title=title,
         description=description,
         payload=payload,
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(f"{tier} Stars Entry", tier)]
+        provider_token="",  # Must be empty string for Telegram Stars
+        currency="XTR",      # Native Telegram Stars Code
+        prices=[LabeledPrice(f"{tier} Telegram Stars", tier)]
     )
 
 async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,11 +344,11 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     db_save_prediction(user.id, int(match_id), int(tier), score)
 
     await update.message.reply_text(
-        f"🎉 **PAYMENT CONFIRMED! TICKET LOCKED IN!**\n\n"
-        f"🆔 Match ID: `{match_id}`\n"
-        f"⭐ Tier: `{tier} Stars Pool`\n"
-        f"🎯 Pick: `{score}`\n\n"
-        f"Good luck! Points and prize pools settle automatically when the game ends!",
+        f"🎉 **STARS PAYMENT RECEIVED! TICKET CONFIRMED!** 🎉\n\n"
+        f"🆔 **Match ID:** `{match_id}`\n"
+        f"⭐ **Entry Tier:** `{tier} Stars Pool`\n"
+        f"🎯 **Your Prediction:** `{score}`\n\n"
+        f"Good luck! Winner prize pools settle and distribute automatically at full-time!",
         parse_mode="Markdown"
     )
 
@@ -308,8 +362,8 @@ async def balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     balance = row[0] if row else 0
     await update.message.reply_text(
-        f"💰 **Your Balance:** `{balance} Stars`\n\n"
-        f"All winning pool credits accumulate here!",
+        f"💰 **Your Current Star Balance:** `{balance} Stars`\n\n"
+        f"All fallback pool credits accumulate here!",
         parse_mode="Markdown"
     )
 
@@ -323,16 +377,15 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     balance = row[0] if row else 0
     if balance <= 0:
-        await update.message.reply_text("❌ You have no Stars in your balance to withdraw!")
+        await update.message.reply_text("❌ You currently have 0 Stars in your balance to withdraw!")
         return
 
-    # Notify Admin of withdrawal request
     try:
         admin_alert = (
             f"🚨 **NEW WITHDRAWAL REQUEST!** 🚨\n\n"
             f"👤 **User:** @{user.username or user.first_name} (`ID: {user.id}`)\n"
             f"💰 **Amount Requested:** `{balance} Stars`\n\n"
-            f"Send them Telegram Star Gifts or transfer stars directly!"
+            f"Send them Telegram Star Gifts directly!"
         )
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_alert, parse_mode="Markdown")
     except Exception as e:
@@ -381,6 +434,7 @@ if __name__ == "__main__":
         job_queue.run_repeating(auto_settle_and_payout_job, interval=600, first=10)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(verify_sub_callback, pattern="^check_sub$"))
     app.add_handler(CallbackQueryHandler(handle_prediction_button, pattern="^pred_"))
     app.add_handler(CallbackQueryHandler(handle_payment_button, pattern="^pay_"))
     
